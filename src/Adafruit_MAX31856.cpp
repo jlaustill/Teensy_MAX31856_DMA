@@ -88,7 +88,7 @@ bool Adafruit_MAX31856::begin(void) {
 
   #if defined(__IMXRT1062__)
     initDMA();
-    spi_dev.updateSpeed(4000000);
+    // spi_dev.updateSpeed(4000000);
   #endif
 
   // assert on any fault
@@ -347,14 +347,14 @@ uint32_t Adafruit_MAX31856::readRegister24(uint8_t addr) {
   void Adafruit_MAX31856::initDMA() {
     // TX: txBuf → SPI0_PUSHR
     dmaTX.sourceBuffer(txBuf, MAX_DMA);
-    dmaTX.destination(*(volatile uint8_t*)&SPI0_PUSHR);
+    dmaTX.destination(*(volatile uint8_t*)&LPSPI3_TDR);
     dmaTX.disableOnCompletion();
-    dmaTX.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_TX);
+    dmaTX.triggerAtHardwareEvent(DMAMUX_SOURCE_LPSPI3_TX);
     // RX: SPI0_POPR → rxBuf
-    dmaRX.source(*(volatile uint8_t*)&SPI0_POPR);
+    dmaRX.source(*(volatile uint8_t*)&LPSPI3_RDR);
     dmaRX.destinationBuffer(rxBuf, MAX_DMA);
     dmaRX.disableOnCompletion();
-    dmaRX.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_RX);
+    dmaRX.triggerAtHardwareEvent(DMAMUX_SOURCE_LPSPI3_RX);
     dmaRX.attachInterrupt(dmaISR);
     dmaRX.interruptAtCompletion();
   }
@@ -362,7 +362,8 @@ uint32_t Adafruit_MAX31856::readRegister24(uint8_t addr) {
 void Adafruit_MAX31856::readRegisterN(uint8_t addr,
                                       uint8_t buffer[],
                                       uint8_t n) {
-  if (n+1 > MAX_DMA) return;
+  if (n > MAX_DMA - 1) return;
+
 
   addr &= 0x7F;            // clear write bit
 
