@@ -146,6 +146,11 @@ private:
   uint32_t readRegister24(uint8_t addr);
 
   void writeRegister8(uint8_t addr, uint8_t reg);
+
+#if defined(__IMXRT1062__)  // Teensy 4.x
+  uint8_t _cs_pin;
+  void initDMA();
+#endif
 };
 
 #endif

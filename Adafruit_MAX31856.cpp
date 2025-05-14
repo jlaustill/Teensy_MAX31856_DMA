@@ -43,6 +43,11 @@
 #include <SPI.h>
 #include <stdlib.h>
 
+#if defined(__IMXRT1062__)  // Teensy 4.x
+  #include <DMAChannel.h>
+  #include <cstring>        // for memset, memcpy
+#endif
+
 /**************************************************************************/
 /*!
     @brief  Instantiate MAX31856 object and use software SPI pins
@@ -55,7 +60,7 @@
 Adafruit_MAX31856::Adafruit_MAX31856(int8_t spi_cs, int8_t spi_mosi,
                                      int8_t spi_miso, int8_t spi_clk)
     : spi_dev(spi_cs, spi_clk, spi_miso, spi_mosi, 1000000,
-              SPI_BITORDER_MSBFIRST, SPI_MODE1) {}
+              SPI_BITORDER_MSBFIRST, SPI_MODE1) { _cs_pin = spi_cs; }
 
 /**************************************************************************/
 /*!
@@ -65,7 +70,7 @@ Adafruit_MAX31856::Adafruit_MAX31856(int8_t spi_cs, int8_t spi_mosi,
 */
 /**************************************************************************/
 Adafruit_MAX31856::Adafruit_MAX31856(int8_t spi_cs, SPIClass *_spi)
-    : spi_dev(spi_cs, 1000000, SPI_BITORDER_MSBFIRST, SPI_MODE1, _spi) {}
+    : spi_dev(spi_cs, 1000000, SPI_BITORDER_MSBFIRST, SPI_MODE1, _spi) { _cs_pin = spi_cs; }
 
 /**************************************************************************/
 /*!
@@ -80,6 +85,11 @@ bool Adafruit_MAX31856::begin(void) {
 
   if (!initialized)
     return false;
+
+  #if defined(__IMXRT1062__)
+    initDMA();
+    spi_dev.updateSpeed(4000000);
+  #endif
 
   // assert on any fault
   writeRegister8(MAX31856_MASK_REG, 0x0);
@@ -326,6 +336,90 @@ uint32_t Adafruit_MAX31856::readRegister24(uint8_t addr) {
   return ret;
 }
 
+#if defined(__IMXRT1062__)  // Teensy 4.x
+  // DMAChannel includes, globals, ISR
+  static constexpr size_t MAX_DMA = 9;  // 1 opcode + up to 8 data bytes
+  static DMAChannel dmaTX, dmaRX;
+  static uint8_t txBuf[MAX_DMA], rxBuf[MAX_DMA];
+  volatile bool dmaDone;
+  void dmaISR() { dmaDone = true; dmaRX.clearInterrupt(); }
+
+  void Adafruit_MAX31856::initDMA() {
+    // TX: txBuf → SPI0_PUSHR
+    dmaTX.sourceBuffer(txBuf, MAX_DMA);
+    dmaTX.destination(*(volatile uint8_t*)&SPI0_PUSHR);
+    dmaTX.disableOnCompletion();
+    dmaTX.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_TX);
+    // RX: SPI0_POPR → rxBuf
+    dmaRX.source(*(volatile uint8_t*)&SPI0_POPR);
+    dmaRX.destinationBuffer(rxBuf, MAX_DMA);
+    dmaRX.disableOnCompletion();
+    dmaRX.triggerAtHardwareEvent(DMAMUX_SOURCE_SPI0_RX);
+    dmaRX.attachInterrupt(dmaISR);
+    dmaRX.interruptAtCompletion();
+  }
+
+void Adafruit_MAX31856::readRegisterN(uint8_t addr,
+                                      uint8_t buffer[],
+                                      uint8_t n) {
+  if (n+1 > MAX_DMA) return;
+
+  addr &= 0x7F;            // clear write bit
+
+  // 1) start the SPI transaction with the same settings you passed
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
+
+  // 2) pull CS low to start the frame
+  digitalWriteFast(_cs_pin, LOW);
+
+  // 3) prepare the buffers
+  txBuf[0] = addr;
+  memset(txBuf+1, 0, n);
+  dmaDone = false;
+
+  // 4) kick off DMA (RX first, so we clock data in)
+  dmaRX.enable();
+  dmaTX.enable();
+
+  // 5) wait for completion
+  while (!dmaDone) __asm__ volatile("wfi");
+
+  // 6) de‑select the device
+  digitalWriteFast(_cs_pin, HIGH);
+
+  // 7) end the SPI transaction
+  SPI.endTransaction();
+
+  // 8) copy the result (skip the dummy byte)
+  memcpy(buffer, rxBuf + 1, n);
+}
+
+void Adafruit_MAX31856::writeRegister8(uint8_t addr, uint8_t data) {
+  addr |= 0x80;           // set write bit
+
+  // 1) start the SPI transaction
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
+  digitalWriteFast(_cs_pin, LOW);
+
+  // 2) load the buffer and kick DMA
+  txBuf[0] = addr;
+  txBuf[1] = data;
+  dmaDone = false;
+  dmaRX.enable();
+  dmaTX.enable();
+
+  // 3) wait …
+  while (!dmaDone) __asm__ volatile("wfi");
+
+  // 4) wrap up
+  digitalWriteFast(_cs_pin, HIGH);
+  SPI.endTransaction();
+}
+
+
+#else
+  // leave the original methods intact
+
 void Adafruit_MAX31856::readRegisterN(uint8_t addr, uint8_t buffer[],
                                       uint8_t n) {
   addr &= 0x7F; // MSB=0 for read, make sure top bit is not set
@@ -340,3 +434,4 @@ void Adafruit_MAX31856::writeRegister8(uint8_t addr, uint8_t data) {
 
   spi_dev.write(buffer, 2);
 }
+#endif
